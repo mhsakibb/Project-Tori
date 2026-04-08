@@ -3,104 +3,87 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ESP32Servo.h>
+#include <Adafruit_NeoPixel.h>
 
-// --- Motor Driver Pins (Configured for Active-Low Drivers) ---
-const int enablePin = 4;
-const int dirPin1 = 6;
-const int dirPin2 = 5;
-
-// --- Servo Pins ---
+// --- Configuration ---
+const int enablePin = 4; // PWM Pin (Active-Low: 255=OFF, 0=FULL)
+const int dirPin1 = 6;   // Direction Pin 1
+const int dirPin2 = 5;   // Direction Pin 2
 const int frontServoPin = 7;
 const int backServoPin = 8;
+const int rgbPin = 48; // Built-in RGB LED for most ESP32-S3 boards
+
+// --- Objects ---
 Servo frontServo;
 Servo backServo;
-
 AsyncWebServer server(80);
+Adafruit_NeoPixel LED_RGB(1, rgbPin, NEO_GRB + NEO_KHZ800);
 
-// --- Updated Modern UI ---
+// --- Global States ---
+int currentSpeed = 0;
+bool isStopped = true;
+
+// --- Logic: LED Feedback ---
+void updateLED()
+{
+    // 1. Signal Flash (Blue)
+    LED_RGB.setPixelColor(0, LED_RGB.Color(0, 0, 255));
+    LED_RGB.show();
+    delay(30); // Brief blink for user feedback
+
+    // 2. State Color (Red for Stop/Zero, Green for Moving)
+    if (isStopped || currentSpeed == 0)
+    {
+        LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Red
+    }
+    else
+    {
+        LED_RGB.setPixelColor(0, LED_RGB.Color(0, 255, 0)); // Green
+    }
+    LED_RGB.show();
+}
+
+// --- HTML UI (Glassmorphism Design) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <meta charset="UTF-8">
-  <title>Project তরি 🛶</title>
+  <title>Project Tori 🛶</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root {
-      --bg: #0f172a;
-      --glass: rgba(30, 41, 59, 0.7);
-      --accent: #00d2ff;
-      --accent-alt: #3a7bd5;
-      --danger: #ef4444;
-      --warning: #f59e0b;
-    }
-    body {
-      font-family: 'Segoe UI', Roboto, sans-serif;
-      background: radial-gradient(circle at top, #1e293b, #0f172a);
-      color: white; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh;
-    }
-    .container {
-      width: 90%; max-width: 450px; padding: 25px;
-      background: var(--glass); backdrop-filter: blur(10px);
-      border-radius: 24px; border: 1px solid rgba(255,255,255,0.1);
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-    }
-    h1 { font-size: 28px; margin-bottom: 20px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
-
+    :root { --bg: #0f172a; --glass: rgba(30, 41, 59, 0.7); --accent: #00d2ff; --danger: #ef4444; --warning: #f59e0b; }
+    body { font-family: 'Segoe UI', sans-serif; background: radial-gradient(circle at top, #1e293b, #0f172a); color: white; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .container { width: 90%; max-width: 450px; padding: 25px; background: var(--glass); backdrop-filter: blur(10px); border-radius: 24px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 25px 50px rgba(0,0,0,0.5); text-align: center;}
+    h1 { font-size: 26px; letter-spacing: 2px; color: var(--accent); margin-bottom: 20px; }
     .grid-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-    .btn {
-      padding: 18px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer;
-      transition: all 0.3s; text-transform: uppercase; font-size: 14px;
-    }
-    .btn-drive { background: linear-gradient(135deg, var(--accent), var(--accent-alt)); color: white; }
+    .btn { padding: 18px; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; }
+    .btn-drive { background: linear-gradient(135deg, var(--accent), #3a7bd5); color: white; }
     .btn-reverse { background: linear-gradient(135deg, var(--warning), #d97706); color: white; }
-    .btn:active { transform: translateY(2px); filter: brightness(1.2); }
-
-    .panel {
-      background: rgba(255,255,255,0.05); padding: 20px; border-radius: 16px; margin-bottom: 15px;
-      text-align: left; border: 1px solid rgba(255,255,255,0.05);
-    }
+    .btn:active { transform: scale(0.95); filter: brightness(1.2); }
+    .panel { background: rgba(255,255,255,0.05); padding: 15px; border-radius: 16px; margin-bottom: 15px; text-align: left; border: 1px solid rgba(255,255,255,0.05); }
     .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
     .val-badge { background: var(--accent); color: #0f172a; padding: 2px 10px; border-radius: 20px; font-weight: 800; font-size: 14px; }
-
     input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
     input[type=range]::-webkit-slider-runnable-track { height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; }
-    input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%;
-      background: white; cursor: pointer; margin-top: -8px; box-shadow: 0 0 10px var(--accent);
-    }
-
-    .stop-btn {
-      width: 100%; padding: 20px; background: linear-gradient(135deg, #f87171, var(--danger));
-      color: white; border: none; border-radius: 16px; font-size: 20px; font-weight: 800;
-      cursor: pointer; box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.4);
-    }
-    .angle-container { display: flex; justify-content: space-between; gap: 10px; margin-top: 15px; }
-    .btn-mini { flex: 1; background: rgba(255,255,255,0.1); color: white; border: none; padding: 12px 5px; border-radius: 8px; font-size: 14px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-    .btn-mini:active { background: rgba(255,255,255,0.25); }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%; background: white; cursor: pointer; margin-top: -8px; box-shadow: 0 0 10px var(--accent); }
+    .stop-btn { width: 100%; padding: 20px; background: linear-gradient(135deg, #f87171, var(--danger)); color: white; border: none; border-radius: 16px; font-size: 20px; font-weight: 800; cursor: pointer; }
+    .angle-container { display: flex; justify-content: space-between; gap: 5px; margin-top: 10px; }
+    .btn-mini { flex: 1; background: rgba(255,255,255,0.1); color: white; border: none; padding: 10px 5px; border-radius: 8px; font-size: 12px; cursor: pointer; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Project Tori 🛶</h1>
-
+    <h1>PROJECT TORI 🛶</h1>
     <div class="grid-btns">
       <button class="btn btn-drive" onclick="setDirection('forward')">Forward</button>
       <button class="btn btn-reverse" onclick="setDirection('reverse')">Reverse</button>
     </div>
-
     <div class="panel">
-      <div class="label-row">
-        <span>Main Thruster</span>
-        <span class="val-badge" id="speedValue">0</span>
-      </div>
+      <div class="label-row"><span>Thruster Power</span><span class="val-badge" id="speedValue">0</span></div>
       <input type="range" min="0" max="255" value="0" id="speedSlider" oninput="updateSpeed(this.value)">
     </div>
-
     <div class="panel">
-      <div class="label-row">
-        <span>Front Fin</span>
-        <span class="val-badge" style="background:var(--warning)" id="frontVal">97</span>
-      </div>
+      <div class="label-row"><span>Front Fin</span><span class="val-badge" style="background:var(--warning)" id="frontVal">97</span></div>
       <input type="range" min="0" max="180" value="97" id="frontSlider" oninput="updateServo('front', this.value)">
       <div class="angle-container">
         <button class="btn-mini" onclick="quickServo('front', 45)">45°</button>
@@ -108,12 +91,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         <button class="btn-mini" onclick="quickServo('front', 135)">135°</button>
       </div>
     </div>
-
     <div class="panel">
-      <div class="label-row">
-        <span>Back Fin</span>
-        <span class="val-badge" style="background:var(--warning)" id="backVal">97</span>
-      </div>
+      <div class="label-row"><span>Back Fin</span><span class="val-badge" style="background:var(--warning)" id="backVal">97</span></div>
       <input type="range" min="0" max="180" value="97" id="backSlider" oninput="updateServo('back', this.value)">
       <div class="angle-container">
         <button class="btn-mini" onclick="quickServo('back', 45)">45°</button>
@@ -121,10 +100,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         <button class="btn-mini" onclick="quickServo('back', 135)">135°</button>
       </div>
     </div>
-
-    <button class="stop-btn" onclick="setDirection('stopped')">STOP SYSTEM</button>
+    <button class="stop-btn" onclick="setDirection('stopped')">EMERGENCY STOP</button>
   </div>
-
   <script>
     function setDirection(dir) {
       fetch('/action?dir=' + dir);
@@ -155,44 +132,50 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- Setup and Server Logic ---
-
+// --- Main Setup ---
 void setup()
 {
     Serial.begin(115200);
 
+    // LED Init
+    LED_RGB.begin();
+    LED_RGB.setBrightness(40);
+    LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Start Red
+    LED_RGB.show();
+
+    // Servo Init
     ESP32PWM::allocateTimer(0);
     ESP32PWM::allocateTimer(1);
     frontServo.setPeriodHertz(50);
     backServo.setPeriodHertz(50);
     frontServo.attach(frontServoPin, 500, 2400);
     backServo.attach(backServoPin, 500, 2500);
-
     frontServo.write(97);
     backServo.write(97);
 
+    // Motor Init
     pinMode(enablePin, OUTPUT);
     pinMode(dirPin1, OUTPUT);
     pinMode(dirPin2, OUTPUT);
-
-    // Initial State: Motors OFF (Active Low = 255)
     digitalWrite(dirPin1, LOW);
     digitalWrite(dirPin2, LOW);
-    analogWrite(enablePin, 255);
+    analogWrite(enablePin, 255); // Motor OFF (Active-Low)
 
+    // WiFi Access Point
     WiFi.softAP("Project_Tori", "12345678");
-    Serial.print("IP Address: ");
+    Serial.print("AP IP address: ");
     Serial.println(WiFi.softAPIP());
 
+    // Routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send_P(200, "text/html", index_html); });
 
     server.on("/speed", HTTP_GET, [](AsyncWebServerRequest *request)
               {
         if (request->hasParam("val")) {
-            int requestedSpeed = request->getParam("val")->value().toInt();
-            int invertedPWM = 255 - requestedSpeed; // Active-Low inversion
-            analogWrite(enablePin, invertedPWM);
+            currentSpeed = request->getParam("val")->value().toInt();
+            analogWrite(enablePin, 255 - currentSpeed);
+            updateLED();
         }
         request->send(200, "text/plain", "OK"); });
 
@@ -203,6 +186,7 @@ void setup()
             int angle = request->getParam("val")->value().toInt();
             if (target == "front") frontServo.write(angle);
             else if (target == "back") backServo.write(angle);
+            updateLED(); // Pulse blue for movement
         }
         request->send(200, "text/plain", "OK"); });
 
@@ -211,19 +195,20 @@ void setup()
         if (request->hasParam("dir")) {
             String dir = request->getParam("dir")->value();
             if (dir == "forward") {
-                digitalWrite(dirPin1, HIGH);
-                digitalWrite(dirPin2, LOW);
+                digitalWrite(dirPin1, HIGH); digitalWrite(dirPin2, LOW);
+                isStopped = false;
             } else if (dir == "reverse") {
-                digitalWrite(dirPin1, LOW);
-                digitalWrite(dirPin2, HIGH);
+                digitalWrite(dirPin1, LOW); digitalWrite(dirPin2, HIGH);
+                isStopped = false;
             } else if (dir == "stopped") {
-                // FIXED STOP LOGIC
-                digitalWrite(dirPin1, LOW);
-                digitalWrite(dirPin2, LOW);
-                analogWrite(enablePin, 255); // 255 is OFF for Active-Low drivers
+                digitalWrite(dirPin1, LOW); digitalWrite(dirPin2, LOW);
+                analogWrite(enablePin, 255); // Stop Motor
+                currentSpeed = 0;
+                isStopped = true;
                 frontServo.write(97);
                 backServo.write(97);
             }
+            updateLED();
         }
         request->send(200, "text/plain", "OK"); });
 
