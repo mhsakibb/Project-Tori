@@ -1,11 +1,12 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include <AsyncTCP.h>
+#include <DallasTemperature.h>
 #include <ESP32Servo.h>
 #include <ESPAsyncWebServer.h>
-#include <WiFi.h>
 #include <OneWire.h>
-#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <TinyGPSPlus.h>
 
 // --- Configuration ---
 const char *ssid = "tori";
@@ -19,6 +20,8 @@ const int frontServoPin = 7;
 const int backServoPin = 8;
 const int rgbPin = 48;
 const int tempPin = 11;
+const int gpsRxPin = 38;
+const int gpsTxPin = 40;
 
 // --- PWM Constants ---
 const int pwmFreq = 5000;
@@ -32,6 +35,8 @@ AsyncWebServer server(80);
 Adafruit_NeoPixel LED_RGB(1, rgbPin, NEO_GRB + NEO_KHZ800);
 OneWire oneWire(tempPin);
 DallasTemperature tempSensor(&oneWire);
+HardwareSerial GPS_Serial(1);
+TinyGPSPlus gps;
 
 // --- Global States & Thread Safety Flags ---
 int currentSpeed = 0;
@@ -42,6 +47,8 @@ bool servoUpdateRequired = false;
 
 // NEW: Global variable to store the latest temperature
 float currentTemp = 0.0;
+float currentLat = 0.0;
+float currentLng = 0.0;
 
 unsigned long previousRGBTime = 0;
 const long rgbInterval = 5;
@@ -51,54 +58,73 @@ unsigned long previousTempTime = 0;
 const long tempInterval = 2000;
 
 // --- Logic Functions (Called only from Loop for thread safety) ---
-void applyMotorLogic()
-{
-    ledcWrite(pwmChannel, 255 - currentSpeed);
+void applyMotorLogic() {
+  ledcWrite(pwmChannel, 255 - currentSpeed);
 
-    if (isStopped || currentSpeed == 0)
-    {
-        LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Red
-    }
-    else if (currentSpeed < 255)
-    {
-        LED_RGB.setPixelColor(0, LED_RGB.Color(0, 255, 0)); // Green
-    }
-    LED_RGB.show();
+  if (isStopped || currentSpeed == 0) {
+    LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Red
+  } else if (currentSpeed < 255) {
+    LED_RGB.setPixelColor(0, LED_RGB.Color(0, 255, 0)); // Green
+  }
+  LED_RGB.show();
 }
 
-void emergencyStop()
-{
-    isStopped = true;
-    currentSpeed = 0;
-    targetServoAngle = 97;
-    digitalWrite(dirPin1, LOW);
-    digitalWrite(dirPin2, LOW);
-    frontServo.write(97);
-    backServo.write(97);
-    applyMotorLogic();
-    Serial.println("EVENT:HALTED");
+void emergencyStop() {
+  isStopped = true;
+  currentSpeed = 0;
+  targetServoAngle = 97;
+  digitalWrite(dirPin1, LOW);
+  digitalWrite(dirPin2, LOW);
+  frontServo.write(97);
+  backServo.write(97);
+  applyMotorLogic();
+  Serial.println("EVENT:HALTED");
 }
 
-void handleTemperature()
-{
-    if (millis() - previousTempTime >= tempInterval)
-    {
-        previousTempTime = millis();
-        tempSensor.requestTemperatures();
-        float tempC = tempSensor.getTempCByIndex(0);
+void handleTemperature() {
+  if (millis() - previousTempTime >= tempInterval) {
+    previousTempTime = millis();
+    tempSensor.requestTemperatures();
+    float tempC = tempSensor.getTempCByIndex(0);
 
-        if (tempC != DEVICE_DISCONNECTED_C)
-        {
-            currentTemp = tempC; // NEW: Update the global variable
-            Serial.print("TEMP OF THE MAIN BOARD: ");
-            Serial.print(currentTemp);
-            Serial.println(" °C");
-        }
-        else
-        {
-            Serial.println("TEMP: SENSOR ERROR (Check Wiring)");
-        }
+    if (tempC != DEVICE_DISCONNECTED_C) {
+      currentTemp = tempC; // NEW: Update the global variable
+      Serial.print("TEMP OF THE MAIN BOARD: ");
+      Serial.print(currentTemp);
+      Serial.println(" °C");
+    } else {
+      Serial.println("TEMP: SENSOR ERROR (Check Wiring)");
     }
+  }
+}
+
+void handleGPS() {
+  while (GPS_Serial.available() > 0) {
+    gps.encode(GPS_Serial.read());
+  }
+
+  // Send satellite count every 2 seconds (same interval as temp)
+  static unsigned long lastGpsTime = 0;
+  if (millis() - lastGpsTime >= 2000) {
+    lastGpsTime = millis();
+
+    if (gps.charsProcessed() < 10) {
+      Serial.println("GPS: WIRING_ERROR");
+    } else {
+      Serial.print("GPS_SAT: ");
+      Serial.println(gps.satellites.value());
+
+      if (gps.location.isValid()) {
+        currentLat = gps.location.lat();
+        currentLng = gps.location.lng();
+
+        Serial.print("GPS: ");
+        Serial.print(currentLat, 6);
+        Serial.print(",");
+        Serial.println(currentLng, 6);
+      }
+    }
+  }
 }
 
 // --- HTML UI ---
@@ -160,137 +186,156 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-void setup()
-{
-    Serial.begin(115200);
-    LED_RGB.begin();
-    LED_RGB.setBrightness(50);
+void setup() {
+  Serial.begin(115200);
+  GPS_Serial.begin(9600, SERIAL_8N1, gpsRxPin, gpsTxPin);
 
-    tempSensor.begin();
+  LED_RGB.begin();
+  LED_RGB.setBrightness(50);
 
-    ledcSetup(pwmChannel, pwmFreq, pwmResolution);
-    ledcAttachPin(enablePin, pwmChannel);
-    pinMode(dirPin1, OUTPUT);
-    pinMode(dirPin2, OUTPUT);
+  tempSensor.begin();
 
-    ESP32PWM::allocateTimer(0);
-    ESP32PWM::allocateTimer(1);
-    frontServo.attach(frontServoPin, 500, 2400);
-    backServo.attach(backServoPin, 500, 2500);
+  ledcSetup(pwmChannel, pwmFreq, pwmResolution);
+  ledcAttachPin(enablePin, pwmChannel);
+  pinMode(dirPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT);
 
-    emergencyStop();
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  frontServo.attach(frontServoPin, 500, 2400);
+  backServo.attach(backServoPin, 500, 2500);
 
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        delay(500);
-        Serial.print(".");
+  emergencyStop();
+
+  WiFi.begin(ssid, password);
+
+  // Wait max 5 seconds for WiFi, then continue anyway!
+  int wifiWait = 0;
+  while (WiFi.status() != WL_CONNECTED && wifiWait < 10) {
+    delay(500);
+    Serial.print(".");
+    wifiWait++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Ready! IP: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\nWiFi Failed! Proceeding with USB only.");
+  }
+
+  // --- Web Handlers ---
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", index_html);
+  });
+
+  server.on("/temp", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String tempString = String(currentTemp);
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "text/plain", tempString);
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
+
+  server.on("/speed", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("val")) {
+      currentSpeed = request->getParam("val")->value().toInt();
+      hardwareUpdateRequired = true;
     }
-    Serial.println("\nReady! IP: " + WiFi.localIP().toString());
+    request->send(200);
+  });
 
-    // --- Web Handlers ---
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-              { request->send(200, "text/html", index_html); });
+  server.on("/servo", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("target") && request->hasParam("val")) {
+      int angle = request->getParam("val")->value().toInt();
+      String target = request->getParam("target")->value();
 
-    // NEW: Temperature Route for Desktop App
-    server.on("/temp", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        // Convert the float temperature to a string
-        String tempString = String(currentTemp);
+      if (target == "front") {
+        frontServo.write(angle);
+      } else if (target == "back") {
+        backServo.write(angle);
+      }
+    }
+    AsyncWebServerResponse *response =
+        request->beginResponse(200, "text/plain", "OK");
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
 
-        // Create response and add CORS header so your desktop app can fetch it without errors
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", tempString);
-        response->addHeader("Access-Control-Allow-Origin", "*");
-        request->send(response); });
+  server.on("/action", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("dir")) {
+      String dir = request->getParam("dir")->value();
+      if (dir == "forward") {
+        digitalWrite(dirPin1, HIGH);
+        digitalWrite(dirPin2, LOW);
+        isStopped = false;
+      } else if (dir == "reverse") {
+        digitalWrite(dirPin1, LOW);
+        digitalWrite(dirPin2, HIGH);
+        isStopped = false;
+      } else {
+        isStopped = true;
+        currentSpeed = 0;
+      }
+      hardwareUpdateRequired = true;
+    }
+    request->send(200);
+  });
 
-    server.on("/speed", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        if (request->hasParam("val")) {
-            currentSpeed = request->getParam("val")->value().toInt();
-            hardwareUpdateRequired = true;
-        }
-        request->send(200); });
-
-    server.on("/servo", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        if (request->hasParam("target") && request->hasParam("val")) {
-            int angle = request->getParam("val")->value().toInt();
-            String target = request->getParam("target")->value();
-
-            if (target == "front") {
-                frontServo.write(angle);
-            } else if (target == "back") {
-                backServo.write(angle);
-            }
-        }
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "OK");
-        response->addHeader("Access-Control-Allow-Origin", "*");
-        request->send(response); });
-
-    server.on("/action", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        if (request->hasParam("dir")) {
-            String dir = request->getParam("dir")->value();
-            if (dir == "forward") { digitalWrite(dirPin1, HIGH); digitalWrite(dirPin2, LOW); isStopped = false; }
-            else if (dir == "reverse") { digitalWrite(dirPin1, LOW); digitalWrite(dirPin2, HIGH); isStopped = false; }
-            else { isStopped = true; currentSpeed = 0; }
-            hardwareUpdateRequired = true;
-        }
-        request->send(200); });
-
-    server.begin();
+  server.begin();
 }
 
-void loop()
-{
-    if (hardwareUpdateRequired)
-    {
-        applyMotorLogic();
-        hardwareUpdateRequired = false;
+void loop() {
+  if (hardwareUpdateRequired) {
+    applyMotorLogic();
+    hardwareUpdateRequired = false;
+  }
+
+  if (servoUpdateRequired) {
+    frontServo.write(targetServoAngle);
+    servoUpdateRequired = false;
+  }
+
+  handleTemperature();
+  handleGPS();
+
+  // ==========================================
+  // UPDATED: Added DIR:FWD and DIR:REV parsing
+  // ==========================================
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    Serial.println("ACK: " + cmd);
+
+    if (cmd == "DIR:FWD") {
+      digitalWrite(dirPin1, HIGH);
+      digitalWrite(dirPin2, LOW);
+      isStopped = false;
+      hardwareUpdateRequired = true;
+    } else if (cmd == "DIR:REV") {
+      digitalWrite(dirPin1, LOW);
+      digitalWrite(dirPin2, HIGH);
+      isStopped = false;
+      hardwareUpdateRequired = true;
+    } else if (cmd.startsWith("SPD:")) {
+      currentSpeed = cmd.substring(4).toInt();
+      applyMotorLogic();
+    } else if (cmd.startsWith("F_SRV:")) {
+      frontServo.write(cmd.substring(6).toInt());
+    } else if (cmd.startsWith("B_SRV:")) {
+      backServo.write(cmd.substring(6).toInt());
+    } else if (cmd == "STOP") {
+      emergencyStop();
     }
+  }
 
-    if (servoUpdateRequired)
-    {
-        frontServo.write(targetServoAngle);
-        servoUpdateRequired = false;
+  if (!isStopped && currentSpeed == 255) {
+    if (millis() - previousRGBTime >= rgbInterval) {
+      previousRGBTime = millis();
+      rainbowHue += 256;
+      LED_RGB.setPixelColor(0, LED_RGB.ColorHSV(rainbowHue, 255, 255));
+      LED_RGB.show();
     }
+  }
 
-    handleTemperature();
-
-    if (Serial.available() > 0)
-    {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
-
-        if (cmd.startsWith("SPD:"))
-        {
-            currentSpeed = cmd.substring(4).toInt();
-            applyMotorLogic();
-        }
-        else if (cmd.startsWith("F_SRV:"))
-        {
-            frontServo.write(cmd.substring(6).toInt());
-        }
-        else if (cmd.startsWith("B_SRV:"))
-        {
-            backServo.write(cmd.substring(6).toInt());
-        }
-        else if (cmd == "STOP")
-        {
-            emergencyStop();
-        }
-    }
-
-    if (!isStopped && currentSpeed == 255)
-    {
-        if (millis() - previousRGBTime >= rgbInterval)
-        {
-            previousRGBTime = millis();
-            rainbowHue += 256;
-            LED_RGB.setPixelColor(0, LED_RGB.ColorHSV(rainbowHue, 255, 255));
-            LED_RGB.show();
-        }
-    }
-
-    yield();
+  yield();
 }
