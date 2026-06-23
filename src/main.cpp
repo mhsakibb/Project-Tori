@@ -73,15 +73,15 @@ void applyMotorLogic()
 {
     ledcWrite(pwmChannel, 255 - currentSpeed);
 
-    if (isStopped || currentSpeed == 0)
-    {
-        LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Red
-    }
-    else if (currentSpeed < 255)
-    {
-        LED_RGB.setPixelColor(0, LED_RGB.Color(0, 255, 0)); // Green
-    }
-    LED_RGB.show();
+    // if (isStopped || currentSpeed == 0)
+    // {
+    //     LED_RGB.setPixelColor(0, LED_RGB.Color(255, 0, 0)); // Red
+    // }
+    // else if (currentSpeed < 255)
+    // {
+    //     LED_RGB.setPixelColor(0, LED_RGB.Color(0, 255, 0)); // Green
+    // }
+    // LED_RGB.show();
 }
 
 void emergencyStop()
@@ -306,8 +306,8 @@ void setup()
         Serial.println("MPU9250 Calibration Complete!");
     }
 
-    LED_RGB.begin();
-    LED_RGB.setBrightness(50);
+    // LED_RGB.begin();
+    // LED_RGB.setBrightness(50);
 
     tempSensor.begin();
 
@@ -467,16 +467,16 @@ void loop()
         }
     }
 
-    if (!isStopped && currentSpeed == 255)
-    {
-        if (millis() - previousRGBTime >= rgbInterval)
-        {
-            previousRGBTime = millis();
-            rainbowHue += 256;
-            LED_RGB.setPixelColor(0, LED_RGB.ColorHSV(rainbowHue, 255, 255));
-            LED_RGB.show();
-        }
-    }
+    // if (!isStopped && currentSpeed == 255)
+    // {
+    //     if (millis() - previousRGBTime >= rgbInterval)
+    //     {
+    //         previousRGBTime = millis();
+    //         rainbowHue += 256;
+    //         LED_RGB.setPixelColor(0, LED_RGB.ColorHSV(rainbowHue, 255, 255));
+    //         LED_RGB.show();
+    //     }
+    // }
 
     yield();
 }
